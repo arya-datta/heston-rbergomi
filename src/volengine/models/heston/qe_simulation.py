@@ -1,0 +1,173 @@
+"""Andersen (2008) Quadratic-Exponential scheme for Heston Monte Carlo.
+
+Reference: Andersen, L. (2008), *Simple and Efficient Simulation of the Heston
+Model*, Journal of Computational Finance, 11(3).
+
+Why QE and not Euler
+--------------------
+A naive Euler discretization of the variance SDE,
+
+    v_{t+dt} = v_t + kappa (theta - v_t) dt + xi sqrt(v_t) sqrt(dt) Z,
+
+routinely drives v below zero, especially under sub-Feller calibration
+(2 kappa theta < xi^2). Reflecting / truncating Euler is biased and converges
+poorly. The QE scheme moment-matches the conditional distribution of v_{t+dt}
+given v_t to either:
+
+  (a) a non-central chi-squared squared-Gaussian (when psi <= psi_c), or
+  (b) an exponential-with-Dirac-mass-at-zero (when psi > psi_c),
+
+where psi = s^2 / m^2 is the variance-to-mean ratio of v_{t+dt} | v_t. The
+critical threshold psi_c = 1.5 is the value at which the two approximations
+agree on their first two moments. QE is exact in moments and produces strictly
+non-negative paths.
+
+For the log-spot we use the "Broadie-Kaya-style" exact integral of the variance
+in the drift, then condition on the variance process to integrate the spot SDE
+(the 'martingale correction' / 'gamma' weights described in Andersen Section 4).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from volengine.models.heston.parameters import HestonParameters
+
+# Andersen's defaults — gamma1 = gamma2 = 0.5 is the central scheme; the
+# critical psi threshold of 1.5 is the universally cited choice.
+_PSI_C = 1.5
+_GAMMA1 = 0.5
+_GAMMA2 = 0.5
+
+
+@dataclass
+class HestonQESimulator:
+    """Andersen QE simulator for the Heston model.
+
+    Parameters
+    ----------
+    params : Heston parameters.
+    r, q   : risk-free rate and dividend yield.
+
+    Methods
+    -------
+    simulate_paths(S0, T, n_paths, n_steps, seed, antithetic)
+        Returns (paths, variances) of shape (n_paths, n_steps + 1).
+
+    terminal_spots(S0, T, n_paths, n_steps, seed, antithetic)
+        Returns the terminal spot array only (lighter on memory).
+    """
+
+    params: HestonParameters
+    r: float
+    q: float
+
+    def simulate_paths(
+        self,
+        S0: float,
+        T: float,
+        n_paths: int,
+        n_steps: int,
+        seed: int | None = None,
+        antithetic: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Simulate full spot + variance paths under the QE scheme.
+
+        Returns
+        -------
+        S : ndarray of shape (n_paths, n_steps + 1), spot paths.
+        V : ndarray of shape (n_paths, n_steps + 1), variance paths.
+        """
+        rng = np.random.default_rng(seed)
+        kappa, theta, xi, rho, v0 = self.params.as_tuple()
+        dt = T / n_steps
+
+        # Antithetic doubles paths along axis 0; total path count is preserved.
+        if antithetic:
+            half = n_paths // 2
+            Z_v = rng.standard_normal((half, n_steps))
+            Z_s = rng.standard_normal((half, n_steps))
+            U = rng.uniform(size=(half, n_steps))
+            Z_v = np.concatenate([Z_v, -Z_v], axis=0)
+            Z_s = np.concatenate([Z_s, -Z_s], axis=0)
+            U = np.concatenate([U, U], axis=0)
+            n_paths = Z_v.shape[0]
+        else:
+            Z_v = rng.standard_normal((n_paths, n_steps))
+            Z_s = rng.standard_normal((n_paths, n_steps))
+            U = rng.uniform(size=(n_paths, n_steps))
+
+        S = np.empty((n_paths, n_steps + 1))
+        V = np.empty((n_paths, n_steps + 1))
+        S[:, 0] = S0
+        V[:, 0] = v0
+
+        # Cache the constants used by the log-spot update (Andersen eq. 33).
+        K0 = -rho * kappa * theta / xi * dt
+        K1 = _GAMMA1 * dt * (kappa * rho / xi - 0.5) - rho / xi
+        K2 = _GAMMA2 * dt * (kappa * rho / xi - 0.5) + rho / xi
+        K3 = _GAMMA1 * dt * (1.0 - rho**2)
+        K4 = _GAMMA2 * dt * (1.0 - rho**2)
+        exp_kdt = np.exp(-kappa * dt)
+
+        logS = np.log(S[:, 0])
+        for i in range(n_steps):
+            v_curr = V[:, i]
+            # Conditional moments of v_{t+dt} | v_t (Andersen eq. 17-18).
+            m = theta + (v_curr - theta) * exp_kdt
+            s2 = (
+                v_curr * xi**2 * exp_kdt / kappa * (1.0 - exp_kdt)
+                + theta * xi**2 / (2.0 * kappa) * (1.0 - exp_kdt) ** 2
+            )
+            psi = s2 / np.maximum(m**2, 1e-16)
+
+            v_next = np.empty_like(v_curr)
+
+            # --- Low-psi branch: squared-Gaussian approximation. ---
+            low = psi <= _PSI_C
+            if np.any(low):
+                psi_lo = psi[low]
+                inv_psi = 1.0 / psi_lo
+                # Andersen eq. 27-29.
+                b2 = 2.0 * inv_psi - 1.0 + np.sqrt(2.0 * inv_psi) * np.sqrt(2.0 * inv_psi - 1.0)
+                a = m[low] / (1.0 + b2)
+                v_next[low] = a * (np.sqrt(b2) + Z_v[low, i]) ** 2
+
+            # --- High-psi branch: exponential with point mass at 0. ---
+            high = ~low
+            if np.any(high):
+                psi_hi = psi[high]
+                p = (psi_hi - 1.0) / (psi_hi + 1.0)
+                beta = (1.0 - p) / np.maximum(m[high], 1e-16)
+                u_hi = U[high, i]
+                v_next_hi = np.where(u_hi <= p, 0.0, np.log((1.0 - p) / np.maximum(1.0 - u_hi, 1e-16)) / beta)
+                v_next[high] = v_next_hi
+
+            # Log-spot update (Andersen eq. 33), conditional on (v_curr, v_next).
+            logS = (
+                logS
+                + (self.r - self.q) * dt
+                + K0
+                + K1 * v_curr
+                + K2 * v_next
+                + np.sqrt(K3 * v_curr + K4 * v_next) * Z_s[:, i]
+            )
+            S[:, i + 1] = np.exp(logS)
+            V[:, i + 1] = v_next
+
+        return S, V
+
+    def terminal_spots(
+        self,
+        S0: float,
+        T: float,
+        n_paths: int,
+        n_steps: int,
+        seed: int | None = None,
+        antithetic: bool = True,
+    ) -> np.ndarray:
+        """Convenience: return only S_T. Useful for European pricing."""
+        S, _ = self.simulate_paths(S0, T, n_paths, n_steps, seed, antithetic)
+        return S[:, -1]
