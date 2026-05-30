@@ -19,9 +19,13 @@ process whose mean has a closed form). Under rBergomi it has a closed form
 also cross-check against the model-free Demeterfi-Derman-Kamal-Zou (1999)
 static replication formula:
 
-    K_var^repl = (2/T) * [ int_0^F P(K) / K^2 dK  +  int_F^infty C(K) / K^2 dK ]
+    K_var^repl = (2 e^{rT} / T) * [ int_0^F P(K)/K^2 dK + int_F^infty C(K)/K^2 dK ]
 
-evaluated on the model's vanilla prices.
+evaluated on the model's vanilla prices. The e^{rT} factor undoes the e^{-rT}
+discounting baked into present-value option prices: the replication weights
+forward (undiscounted) option payoffs, so discounted prices must be grown
+back to time T. Centering the strip on the forward K* = F makes the
+deterministic log-contract correction terms vanish.
 """
 
 from __future__ import annotations
@@ -74,22 +78,32 @@ def variance_swap_rate_replication(
     F: float,
     T: float,
     K_grid: np.ndarray,
+    r: float,
 ) -> float:
     """Model-free static replication (Demeterfi-Derman-Kamal-Zou 1999).
 
-        K_var ~= (2/T) * sum_K (puts(K) below F + calls(K) above F) / K^2 * dK
+        K_var ~= (2 e^{rT} / T) * int [ puts(K) below F + calls(K) above F ] / K^2 dK
 
     Parameters
     ----------
-    price_call_fn : (K, T) -> call price.
-    price_put_fn  : (K, T) -> put price.
-    S0, F : spot and forward.
+    price_call_fn : (K, T) -> *discounted* (present-value) call price.
+    price_put_fn  : (K, T) -> *discounted* (present-value) put price.
+    S0, F : spot and forward (F = S0 e^{(r-q)T}).
     T : maturity.
     K_grid : ascending strikes covering wings well into OTM territory.
+    r : risk-free rate. Required for the e^{rT} growth factor that converts
+        discounted option prices back to forward (undiscounted) payoffs — the
+        replication weights time-T payoffs, not present values. Omitting this
+        factor biases the strike low by exactly e^{rT}.
 
     Returns
     -------
     Variance swap fair strike from the replication formula.
+
+    Notes
+    -----
+    The strip is centered on K* = F, which makes the deterministic log-contract
+    correction terms vanish; only the option integral remains.
     """
     K_grid = np.asarray(K_grid, dtype=float)
     below = K_grid < F
@@ -102,4 +116,4 @@ def variance_swap_rate_replication(
         prices[above] = price_call_fn(K_grid[above], T)
     integrand = prices / K_grid**2
     integral = _trapezoid(integrand, K_grid)
-    return float(2.0 / T * integral)
+    return float(2.0 * np.exp(r * T) / T * integral)

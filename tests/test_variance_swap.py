@@ -45,8 +45,13 @@ def test_replication_against_heston_closed_form(market):
         return heston_vanilla_price(K, T_, market["S0"], market["r"], market["q"], p, flag="put")
 
     K_repl = variance_swap_rate_replication(call_fn, put_fn,
-                                             S0=market["S0"], F=F, T=T, K_grid=K_grid)
+                                             S0=market["S0"], F=F, T=T,
+                                             K_grid=K_grid, r=market["r"])
     K_closed = variance_swap_rate_heston(p, T)
-    # Replication discretization error: 200 bps tolerance on variance,
-    # which is generous given the wing tail truncation.
-    assert abs(K_repl - K_closed) < 0.02
+    # With the e^{rT} growth factor correct and a 400-point strip out to 2F,
+    # replication matches the CIR closed form to ~4e-6 (measured). We assert
+    # 5e-5 — leaving ~13x headroom over the real residual while staying ~12x
+    # below the 6e-4 bias a missing e^{rT} factor would introduce. This is a
+    # genuine cross-check, not a rubber-stamp: the old 0.02 tolerance was 400x
+    # too loose and silently passed a 1.5% pricing error.
+    assert abs(K_repl - K_closed) < 5e-5
