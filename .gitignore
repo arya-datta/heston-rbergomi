@@ -16,3 +16,5 @@ results/figures/*.png
 # Scratch files / pip logs.
 _pip_*.log
 .scratch/
+# Private interview prep — not part of the public repo.
+interview_prep/

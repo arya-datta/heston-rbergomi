@@ -80,6 +80,11 @@ dependency graph, and extension points.
    trading day and tracks RMSE, parameter drift, and the model risk spread on
    a held-out portfolio of vanillas.
 
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — layered scope diagram and extension points.
+- [`docs/REFERENCES.md`](docs/REFERENCES.md) — full bibliography.
+
 ## References
 
 The full bibliography is in [`docs/REFERENCES.md`](docs/REFERENCES.md). The
