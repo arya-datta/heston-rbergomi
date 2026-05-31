@@ -10,7 +10,7 @@ from volengine.models.heston import (
     heston_char_fn,
     heston_vanilla_price,
 )
-from volengine.surfaces.implied_vol import black_scholes_price, implied_vol
+from volengine.surfaces.implied_vol import black_scholes_price
 
 
 def _heston_call_by_integration(K, T, S0, r, q, params, alpha=1.5):

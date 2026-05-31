@@ -171,3 +171,59 @@ class HestonQESimulator:
         """Convenience: return only S_T. Useful for European pricing."""
         S, _ = self.simulate_paths(S0, T, n_paths, n_steps, seed, antithetic)
         return S[:, -1]
+
+    def price_european(
+        self,
+        S0: float,
+        T: float,
+        K: float | np.ndarray,
+        n_paths: int,
+        n_steps: int,
+        seed: int | None = None,
+        antithetic: bool = True,
+        flag: str = "call",
+        control_variate: bool = True,
+        return_stderr: bool = False,
+    ) -> float | np.ndarray | tuple:
+        """Price European vanillas by QE Monte Carlo.
+
+        Mirrors `volengine.models.rbergomi.pricing.rbergomi_price`: optional
+        terminal-spot control variate (known mean E[S_T] = S0 e^{(r-q)T}) and
+        optional Monte Carlo standard error. The control variate reduces
+        variance by a factor that grows with payoff/S_T correlation (~1.5x ATM,
+        larger ITM), at no bias cost.
+
+        Returns
+        -------
+        price : float or ndarray (matching K).
+        If return_stderr is True, returns (price, stderr).
+        """
+        ST = self.terminal_spots(S0, T, n_paths, n_steps, seed, antithetic)
+        K_arr = np.atleast_1d(np.asarray(K, dtype=float))
+        disc = np.exp(-self.r * T)
+        n = ST.shape[0]
+
+        if flag == "call":
+            payoffs = np.maximum(ST[:, None] - K_arr[None, :], 0.0)
+        elif flag == "put":
+            payoffs = np.maximum(K_arr[None, :] - ST[:, None], 0.0)
+        else:
+            raise ValueError(f"flag must be 'call' or 'put', got {flag!r}")
+
+        if control_variate:
+            EST = S0 * np.exp((self.r - self.q) * T)
+            ST_centered = ST - ST.mean()
+            var_ST = float(np.mean(ST_centered**2))
+            if var_ST > 0:
+                cov = (payoffs - payoffs.mean(axis=0)[None, :]) * ST_centered[:, None]
+                beta = cov.mean(axis=0) / var_ST
+                payoffs = payoffs - beta[None, :] * (ST[:, None] - EST)
+
+        price = disc * payoffs.mean(axis=0)
+        is_scalar = np.isscalar(K) or (np.asarray(K).ndim == 0)
+        out_price = float(price[0]) if is_scalar else price
+        if not return_stderr:
+            return out_price
+        stderr = disc * payoffs.std(axis=0, ddof=1) / np.sqrt(n)
+        out_stderr = float(stderr[0]) if is_scalar else stderr
+        return out_price, out_stderr

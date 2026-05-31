@@ -22,12 +22,12 @@ This module:
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 
 from volengine.models.heston import HestonParameters, heston_vanilla_price
-from volengine.models.rbergomi import RBergomiParameters, rbergomi_price
+from volengine.models.rbergomi import RBergomiParameters
 from volengine.surfaces.implied_vol import implied_vol
 from volengine.surfaces.svi import SVIParameters, svi_total_variance
 
@@ -129,7 +129,8 @@ def rbergomi_atm_skew(
     Ks = np.array([F * np.exp(-dk), F, F * np.exp(dk)])
     disc = np.exp(-r * T)
     prices = disc * np.maximum(ST[:, None] - Ks[None, :], 0.0).mean(axis=0)
-    ivs = [implied_vol(float(p), S0, float(K), T, r, q, "call") for p, K in zip(prices, Ks)]
+    ivs = [implied_vol(float(p), S0, float(K), T, r, q, "call")
+           for p, K in zip(prices, Ks, strict=True)]
     if not all(np.isfinite(v) for v in ivs):
         return float("nan")
     return float(np.abs((ivs[2] - ivs[0]) / (2.0 * dk)))

@@ -78,10 +78,10 @@ def generate_training_data(
                                   seed=int(seed + i * 1009 + j))
             ST = S[:, -1]
             F = S0 * np.exp((r - q) * T)
-            for l, k in enumerate(grid.log_moneyness):
+            for ik, k in enumerate(grid.log_moneyness):
                 K = F * np.exp(k)
                 price = np.exp(-r * T) * np.maximum(ST - K, 0.0).mean()
                 iv = implied_vol(float(price), S0, K, T, r, q, "call")
-                Y[i, j * n_k + l] = iv
+                Y[i, j * n_k + ik] = iv
 
     return X, Y

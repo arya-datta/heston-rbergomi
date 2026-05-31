@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
-from volengine.calibration.objective import IVQuote
+from volengine.calibration.objective import FAILED_QUOTE_PENALTY, IVQuote
 from volengine.models.heston.carr_madan import heston_vanilla_price
 from volengine.models.heston.parameters import HESTON_BOUNDS, HestonParameters
 from volengine.surfaces.implied_vol import implied_vol
@@ -31,6 +31,14 @@ class HestonCalibrationResult:
     feller_ok: bool
     success: bool
     message: str
+
+
+# Carr-Madan grid used inside the calibration inner loop. Coarser than the
+# 8192/0.15 default used for one-off accuracy checks: at N=4096, eta=0.25 the
+# FFT prices are accurate to ~1 bp on liquid strikes — far below calibration
+# IV-fit error — while running ~2x faster. The final calibrated params can be
+# re-priced at full resolution for reporting.
+_CALIB_FFT_KWARGS = {"N": 4096, "eta": 0.25}
 
 
 def _model_ivs(
@@ -50,7 +58,8 @@ def _model_ivs(
     for T, idxs in by_T.items():
         Ks = np.array([quotes[i].K for i in idxs])
         try:
-            prices = heston_vanilla_price(Ks, T, S0, r, q, params, flag="call")
+            prices = heston_vanilla_price(Ks, T, S0, r, q, params, flag="call",
+                                          **_CALIB_FFT_KWARGS)
         except (FloatingPointError, ValueError):
             continue
         prices = np.atleast_1d(prices)
@@ -73,8 +82,8 @@ def _objective_factory(
         params = HestonParameters(*x)
         iv_model = _model_ivs(params, S0, r, q, quotes)
         bad = ~np.isfinite(iv_model)
-        # Use a heavy penalty for failed pricings to push DE away from bad regions.
-        err = np.where(bad, 5.0, iv_model - iv_mkt)
+        # Penalty for failed pricings pushes DE away from bad regions.
+        err = np.where(bad, FAILED_QUOTE_PENALTY, iv_model - iv_mkt)
         return float(np.sqrt(np.sum(weights * err**2) / max(weights.sum(), 1e-12)))
 
     return f

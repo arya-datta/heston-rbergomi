@@ -7,10 +7,10 @@ from volengine.surfaces.implied_vol import (
 )
 from volengine.surfaces.svi import (
     SVIParameters,
-    svi_total_variance,
-    svi_implied_vol,
-    fit_svi_slice,
     SVISurface,
+    fit_svi_slice,
+    svi_implied_vol,
+    svi_total_variance,
 )
 
 __all__ = [

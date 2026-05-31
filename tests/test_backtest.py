@@ -12,7 +12,6 @@ warm-start saves time.
 """
 
 import datetime as dt
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -20,12 +19,12 @@ import pandas as pd
 import pytest
 
 from volengine.backtesting import backtest_engine as bte
-from volengine.backtesting.data_loader import OptionChainSnapshot
 from volengine.backtesting.backtest_engine import (
     BacktestConfig,
     DayResult,
     run_backtest,
 )
+from volengine.backtesting.data_loader import OptionChainSnapshot
 from volengine.models.heston import HestonParameters, heston_vanilla_price
 
 

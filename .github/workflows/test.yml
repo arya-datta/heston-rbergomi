@@ -29,11 +29,14 @@ jobs:
           # Install the minimum dependency closure for the fast test subset.
           # openbb pulls a huge tree and is only needed for `live` tests;
           # torch is only needed for the neural stretch.
-          pip install "numpy>=1.24" "scipy>=1.11" "pandas>=2.0" \
+          pip install "numpy>=1.24,<3" "scipy>=1.11,<2" "pandas>=2.0,<4" \
                       "matplotlib>=3.7" "numba>=0.58" "python-dateutil>=2.8" \
                       "pyarrow>=14.0" "tqdm>=4.66" \
-                      "pytest>=7.4" "pytest-cov>=4.1"
+                      "pytest>=7.4" "pytest-cov>=4.1" "ruff>=0.6"
           pip install -e . --no-deps
+
+      - name: Lint (ruff)
+        run: ruff check src/ tests/
 
       - name: Run fast tests
         run: |

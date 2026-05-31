@@ -10,13 +10,20 @@ versus market — IV-space rather than price-space because IV errors are
 roughly homogeneous across moneyness, where price errors are heavily skewed.
 """
 
-from volengine.calibration.objective import IVQuote, iv_rmse_objective
-from volengine.calibration.heston_calibrator import calibrate_heston, HestonCalibrationResult
-from volengine.calibration.rbergomi_calibrator import calibrate_rbergomi, RBergomiCalibrationResult
+from volengine.calibration.heston_calibrator import HestonCalibrationResult, calibrate_heston
+from volengine.calibration.objective import (
+    FAILED_QUOTE_PENALTY,
+    IVQuote,
+    build_iv_quotes,
+    iv_rmse_objective,
+)
+from volengine.calibration.rbergomi_calibrator import RBergomiCalibrationResult, calibrate_rbergomi
 
 __all__ = [
     "IVQuote",
+    "build_iv_quotes",
     "iv_rmse_objective",
+    "FAILED_QUOTE_PENALTY",
     "calibrate_heston",
     "HestonCalibrationResult",
     "calibrate_rbergomi",

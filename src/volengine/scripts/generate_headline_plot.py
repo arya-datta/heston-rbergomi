@@ -23,7 +23,6 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Callable
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -86,7 +85,7 @@ def build_quotes_and_surface(
         mids = group["mid"].to_numpy(dtype=float)
         ivs = np.array([
             implied_vol(p, snap.spot, k, T, snap.r, snap.q, "call")
-            for p, k in zip(mids, K)
+            for p, k in zip(mids, K, strict=True)
         ])
         ok = np.isfinite(ivs) & (ivs > 0)
         if ok.sum() < 5:
@@ -101,7 +100,7 @@ def build_quotes_and_surface(
         # ATM iv via SVI at k = 0
         atm_iv[float(T)] = float(np.sqrt(max(
             np.interp(0.0, k_log, ivs ** 2), 1e-12)))
-        for kk, iv in zip(K, ivs):
+        for kk, iv in zip(K, ivs, strict=True):
             # Weight inversely with distance from ATM — liquid quotes dominate.
             w = 1.0 / max(abs(np.log(kk / snap.spot)) + 0.05, 0.05)
             quotes.append(IVQuote(K=float(kk), T=T, iv_mkt=float(iv), weight=w))

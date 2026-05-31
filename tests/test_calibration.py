@@ -9,10 +9,36 @@ L-BFGS-B optimization (and for rBergomi, an MC inside every DE evaluation).
 import numpy as np
 import pytest
 
-from volengine.calibration import IVQuote, calibrate_heston, calibrate_rbergomi
+from volengine.calibration import (
+    IVQuote,
+    build_iv_quotes,
+    calibrate_heston,
+    calibrate_rbergomi,
+)
 from volengine.models.heston import HestonParameters, heston_vanilla_price
 from volengine.models.rbergomi import RBergomiParameters, rbergomi_price
 from volengine.surfaces.implied_vol import implied_vol
+
+
+def test_build_iv_quotes_spread_weighting():
+    strikes = [90.0, 100.0, 110.0]
+    mats = [0.5, 0.5, 0.5]
+    ivs = [0.22, 0.20, 0.19]
+    spreads = [0.10, 0.02, 0.50]   # ATM is tightest -> highest weight
+    quotes = build_iv_quotes(strikes, mats, ivs, spreads=spreads)
+    assert len(quotes) == 3
+    w = {q.K: q.weight for q in quotes}
+    assert w[100.0] > w[90.0] > w[110.0]      # inverse-spread ordering
+
+
+def test_build_iv_quotes_drops_bad_ivs():
+    quotes = build_iv_quotes([90.0, 100.0], [0.5, 0.5], [np.nan, 0.20])
+    assert len(quotes) == 1 and quotes[0].K == 100.0
+
+
+def test_build_iv_quotes_uniform_when_no_spreads():
+    quotes = build_iv_quotes([90.0, 100.0], [0.5, 0.5], [0.22, 0.20])
+    assert all(q.weight == 1.0 for q in quotes)
 
 
 @pytest.mark.slow
@@ -55,7 +81,7 @@ def test_rbergomi_recovers_synthetic_surface(market):
         prices = rbergomi_price(Ks, T, S0, r, q, true,
                                 n_paths=8000, n_steps=max(20, int(100 * T)),
                                 seed=42)
-        for K, p in zip(Ks, np.atleast_1d(prices)):
+        for K, p in zip(Ks, np.atleast_1d(prices), strict=True):
             iv = implied_vol(float(p), S0, float(K), T, r, q, "call")
             if np.isfinite(iv):
                 quotes.append(IVQuote(K=float(K), T=T, iv_mkt=iv, weight=1.0))

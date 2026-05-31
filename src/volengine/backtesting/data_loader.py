@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import os
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -114,7 +112,7 @@ def _normalize_openbb_chain(
 def load_option_chain(
     symbol: str,
     date: dt.date,
-    spot: Optional[float] = None,
+    spot: float | None = None,
     r: float = 0.05,
     q: float = 0.015,
     provider: str = "yfinance",

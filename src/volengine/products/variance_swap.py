@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from volengine.models.heston import HestonParameters, heston_vanilla_price
+from volengine.models.heston import HestonParameters
 from volengine.models.rbergomi import RBergomiParameters
 
 # NumPy 2.0 removed the long-deprecated np.trapz alias; np.trapezoid is its

@@ -49,7 +49,7 @@ class HestonParameters:
         return (self.kappa, self.theta, self.xi, self.rho, self.v0)
 
     @classmethod
-    def from_tuple(cls, t: tuple[float, ...]) -> "HestonParameters":
+    def from_tuple(cls, t: tuple[float, ...]) -> HestonParameters:
         return cls(*t)
 
 

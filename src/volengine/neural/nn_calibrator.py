@@ -33,7 +33,7 @@ except ImportError:  # pragma: no cover
 class NeuralCalibrator:
     """Trained MLP for rBergomi calibration. Use `train_calibrator` to build one."""
 
-    model: "nn.Module"
+    model: nn.Module
     grid: TrainingGrid
     x_mean: np.ndarray
     x_std: np.ndarray
@@ -97,7 +97,7 @@ def train_calibrator(
     Y_t = torch.tensor(Y_norm, dtype=torch.float32)
     n = len(X_t)
 
-    for epoch in range(epochs):
+    for _epoch in range(epochs):
         perm = torch.randperm(n)
         for i in range(0, n, batch_size):
             idx = perm[i : i + batch_size]

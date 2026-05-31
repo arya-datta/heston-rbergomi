@@ -63,12 +63,16 @@ def simulate_rbergomi(
     V = xi0_t[None, :] * np.exp(params.eta * np.sqrt(2.0 * params.H) * Y - correction[None, :])
 
     # Build the orthogonal Brownian W^perp, then form dW_S = rho dZ + sqrt(1-rho^2) dW^perp.
-    dW_perp = rng.standard_normal((n_paths_eff, n_steps)) * np.sqrt(T / n_steps)
+    # When antithetic, draw only `half` normals and negate them for the mirror
+    # block — this matches Z's antithetic pairing (the hybrid scheme negates its
+    # whole normal block) AND avoids drawing-then-discarding half the variates.
+    sqrt_dt = np.sqrt(T / n_steps)
     if antithetic:
-        # Match antithetic structure of Z: dW^perp must use the same pairing
-        # to preserve the variance reduction. Re-randomize one half to match.
         half = n_paths_eff // 2
-        dW_perp = np.concatenate([dW_perp[:half], -dW_perp[:half]], axis=0)
+        dW_perp_half = rng.standard_normal((half, n_steps)) * sqrt_dt
+        dW_perp = np.concatenate([dW_perp_half, -dW_perp_half], axis=0)
+    else:
+        dW_perp = rng.standard_normal((n_paths_eff, n_steps)) * sqrt_dt
 
     dZ = np.diff(Z, axis=1)  # shape (n_paths_eff, n_steps)
     dW_S = params.rho * dZ + np.sqrt(1.0 - params.rho**2) * dW_perp
@@ -97,22 +101,66 @@ def rbergomi_price(
     n_steps: int = 100,
     seed: int | None = None,
     flag: str = "call",
-) -> float | np.ndarray:
+    control_variate: bool = True,
+    return_stderr: bool = False,
+) -> float | np.ndarray | tuple:
     """MC price of European vanillas under rBergomi.
+
+    Parameters
+    ----------
+    K : strike (scalar or array).
+    T, S0, r, q : maturity, spot, rates.
+    params : RBergomiParameters.
+    n_paths, n_steps : MC dimensions.
+    seed : RNG seed.
+    flag : "call" or "put".
+    control_variate : if True (default), use the terminal spot S_T as a control
+        variate. Its risk-neutral mean E[S_T] = S0 e^{(r-q)T} is known exactly,
+        so subtracting beta*(S_T - E[S_T]) cuts variance at no bias cost. The
+        reduction depends on payoff/S_T correlation: ~1.5x at the money under
+        stochastic vol, larger for ITM strikes where the payoff is nearly
+        linear in S_T, smaller for far-OTM. beta is estimated per strike from
+        the sample covariance (the O(1/n) bias this introduces is negligible).
+    return_stderr : if True, also return the Monte Carlo standard error of the
+        price estimate (same shape as the price). Lets callers distinguish a
+        biased estimate from a merely noisy one — essential when validating
+        "matches FFT within X bps".
 
     Returns
     -------
-    Price (scalar or array, matching shape of K).
+    price : float or ndarray (matching K).
+    If return_stderr is True, returns (price, stderr) with stderr the same type.
     """
     S = simulate_rbergomi(S0, T, params, r, q, n_paths, n_steps, seed=seed)
     ST = S[:, -1]
     K_arr = np.atleast_1d(np.asarray(K, dtype=float))
     disc = np.exp(-r * T)
+    n = ST.shape[0]
+
     if flag == "call":
         payoffs = np.maximum(ST[:, None] - K_arr[None, :], 0.0)
     elif flag == "put":
         payoffs = np.maximum(K_arr[None, :] - ST[:, None], 0.0)
     else:
         raise ValueError(f"flag must be 'call' or 'put', got {flag!r}")
+
+    if control_variate:
+        # Control: C = S_T, with known mean E[S_T] = S0 e^{(r-q)T}.
+        EST = S0 * np.exp((r - q) * T)
+        ST_centered = ST - ST.mean()
+        var_ST = float(np.mean(ST_centered**2))
+        if var_ST > 0:
+            # beta* = Cov(payoff, S_T) / Var(S_T), per strike.
+            cov = (payoffs - payoffs.mean(axis=0)[None, :]) * ST_centered[:, None]
+            beta = cov.mean(axis=0) / var_ST
+            payoffs = payoffs - beta[None, :] * (ST[:, None] - EST)
+
     price = disc * payoffs.mean(axis=0)
-    return float(price[0]) if np.isscalar(K) else price
+    is_scalar = np.isscalar(K) or (np.asarray(K).ndim == 0)
+    out_price = float(price[0]) if is_scalar else price
+
+    if not return_stderr:
+        return out_price
+    stderr = disc * payoffs.std(axis=0, ddof=1) / np.sqrt(n)
+    out_stderr = float(stderr[0]) if is_scalar else stderr
+    return out_price, out_stderr

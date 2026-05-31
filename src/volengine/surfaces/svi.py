@@ -27,10 +27,28 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import minimize
 
+# Tolerance for boundary validation: optimizers (L-BFGS-B with box bounds)
+# legitimately sit exactly on a bound, so we validate with a small slack to
+# avoid spurious ValueErrors at e.g. rho = -0.999 or b = 1e-6.
+_SVI_VALIDATION_TOL = 1e-6
+
 
 @dataclass(frozen=True)
 class SVIParameters:
-    """Raw-SVI parameters for a single maturity slice."""
+    """Raw-SVI parameters for a single maturity slice.
+
+    Validates the structural constraints of raw SVI at construction:
+      - b >= 0      (wings open upward)
+      - -1 < rho < 1 (correlation parameter)
+      - sigma > 0    (curvature of the smile minimum)
+
+    These are the constraints that keep w(k) a well-defined SVI slice. The
+    stronger no-butterfly-arbitrage condition (g(k) >= 0 everywhere) is NOT
+    enforced here — it's checked separately via `svi_butterfly_function`,
+    because a slice can be a valid SVI parameterization yet still admit
+    static arbitrage, and we want to be able to construct and inspect such
+    slices rather than refuse to build them.
+    """
 
     a: float
     b: float
@@ -38,11 +56,26 @@ class SVIParameters:
     m: float
     sigma: float
 
+    def __post_init__(self) -> None:
+        tol = _SVI_VALIDATION_TOL
+        if self.b < -tol:
+            raise ValueError(f"SVI requires b >= 0, got b={self.b}")
+        if not (-1.0 - tol < self.rho < 1.0 + tol):
+            raise ValueError(f"SVI requires -1 < rho < 1, got rho={self.rho}")
+        if self.sigma <= -tol:
+            raise ValueError(f"SVI requires sigma > 0, got sigma={self.sigma}")
+
     def as_array(self) -> np.ndarray:
         return np.array([self.a, self.b, self.rho, self.m, self.sigma])
 
+    def min_total_variance(self) -> float:
+        """Minimum of w(k) over all k. Negative => the slice has negative
+        total variance somewhere (a hard arbitrage), reached at the smile
+        vertex. w_min = a + b*sigma*sqrt(1 - rho^2)."""
+        return self.a + self.b * self.sigma * np.sqrt(max(1.0 - self.rho**2, 0.0))
+
     @classmethod
-    def from_array(cls, x: np.ndarray) -> "SVIParameters":
+    def from_array(cls, x: np.ndarray) -> SVIParameters:
         return cls(a=x[0], b=x[1], rho=x[2], m=x[3], sigma=x[4])
 
 

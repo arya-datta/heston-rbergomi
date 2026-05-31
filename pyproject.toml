@@ -10,10 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Heston Vol Engine" }]
+# Upper bounds guard against silent major-version breakage. numpy<3 is
+# explicit because numpy 2.0 already removed np.trapz once and broke this
+# package; the next major could do the same.
 dependencies = [
-    "numpy>=1.24",
-    "scipy>=1.11",
-    "pandas>=2.0",
+    "numpy>=1.24,<3",
+    "scipy>=1.11,<2",
+    "pandas>=2.0,<4",
     "matplotlib>=3.7",
     "numba>=0.58",
     "openbb>=4.3",
@@ -42,3 +45,29 @@ markers = [
     "slow: tests that take > ~10s; deselect with `pytest -m 'not slow'`",
     "live: tests that hit a live network/data provider; deselect by default",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# E/F: pyflakes + pycodestyle errors; I: import sorting; UP: pyupgrade;
+# B: bugbear (catches e.g. mutable defaults, bare except misuse);
+# NPY: numpy-specific lints (would have flagged the np.trapz removal).
+select = ["E", "F", "I", "UP", "B", "NPY"]
+ignore = [
+    "E501",   # line length handled by formatter, not enforced hard
+    "B008",   # function calls in argument defaults (np.array(...) defaults)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"notebooks/*" = ["E402"]   # imports after prose cells
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true   # openbb / numba have partial stubs
+warn_unused_ignores = true
+# Not --strict yet: the codebase is fully type-hinted but third-party stubs
+# are incomplete. Run `mypy src/volengine` for a best-effort check.

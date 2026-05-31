@@ -80,7 +80,7 @@ def fit_and_score(snap: OptionChainSnapshot) -> pd.DataFrame:
         mids = group["mid"].to_numpy(dtype=float)
         ivs = np.array([
             implied_vol(p, snap.spot, k, T, snap.r, snap.q, "call")
-            for p, k in zip(mids, K)
+            for p, k in zip(mids, K, strict=True)
         ])
         ok = np.isfinite(ivs) & (ivs > 0)
         if ok.sum() < 5:

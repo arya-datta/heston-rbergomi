@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
-from volengine.calibration.objective import IVQuote
+from volengine.calibration.objective import FAILED_QUOTE_PENALTY, IVQuote
 from volengine.models.rbergomi.parameters import RBERGOMI_BOUNDS, RBergomiParameters
 from volengine.models.rbergomi.pricing import simulate_rbergomi
 from volengine.surfaces.implied_vol import implied_vol
@@ -81,7 +81,7 @@ def _objective_factory_rbergomi(
         params = RBergomiParameters(H=H, eta=eta, rho=rho, xi0=xi0)
         iv_model = _model_ivs_rbergomi(params, S0, r, q, quotes, n_paths, n_steps_per_year, seed)
         bad = ~np.isfinite(iv_model)
-        err = np.where(bad, 5.0, iv_model - iv_mkt)
+        err = np.where(bad, FAILED_QUOTE_PENALTY, iv_model - iv_mkt)
         return float(np.sqrt(np.sum(weights * err**2) / max(weights.sum(), 1e-12)))
 
     return f

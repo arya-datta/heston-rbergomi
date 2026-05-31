@@ -18,6 +18,28 @@ def test_svi_total_variance_nonnegative():
     assert np.all(svi_total_variance(k, p) >= 0)
 
 
+def test_svi_validation_rejects_invalid_params():
+    with pytest.raises(ValueError, match="b >= 0"):
+        SVIParameters(a=0.01, b=-0.1, rho=-0.5, m=0.0, sigma=0.2)
+    with pytest.raises(ValueError, match="-1 < rho < 1"):
+        SVIParameters(a=0.01, b=0.1, rho=1.5, m=0.0, sigma=0.2)
+    with pytest.raises(ValueError, match="sigma > 0"):
+        SVIParameters(a=0.01, b=0.1, rho=-0.5, m=0.0, sigma=-0.2)
+
+
+def test_svi_validation_allows_boundary_values():
+    # Optimizers legitimately sit on box bounds (rho = -0.999, b = 1e-6);
+    # validation must not reject these.
+    SVIParameters(a=1e-6, b=1e-6, rho=-0.999, m=0.0, sigma=1e-4)
+
+
+def test_svi_min_total_variance():
+    p = SVIParameters(a=0.02, b=0.05, rho=-0.4, m=0.0, sigma=0.3)
+    # Analytic minimum should match the grid minimum of w(k).
+    k = np.linspace(-3, 3, 5000)
+    assert p.min_total_variance() == pytest.approx(svi_total_variance(k, p).min(), abs=1e-4)
+
+
 def test_svi_butterfly_arb_free_for_smooth_smile():
     # Well-behaved SVI slice should pass butterfly check on a wide grid.
     p = SVIParameters(a=0.02, b=0.05, rho=-0.4, m=0.0, sigma=0.3)
