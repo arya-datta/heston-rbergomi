@@ -35,11 +35,100 @@ import numpy as np
 
 from volengine.models.heston.parameters import HestonParameters
 
+# Optional Numba acceleration. The JIT kernel is an exact re-implementation of
+# the NumPy loop below; both consume the same pre-generated random draws, so
+# they agree to floating-point precision. Falls back to NumPy if numba absent.
+try:
+    from numba import njit
+
+    _HAS_NUMBA = True
+except ImportError:  # pragma: no cover
+    _HAS_NUMBA = False
+
+    def njit(*args, **kwargs):  # type: ignore - no-op decorator fallback
+        def wrap(f):
+            return f
+        return wrap if (args and callable(args[0])) is False else args[0]
+
 # Andersen's defaults — gamma1 = gamma2 = 0.5 is the central scheme; the
 # critical psi threshold of 1.5 is the universally cited choice.
 _PSI_C = 1.5
 _GAMMA1 = 0.5
 _GAMMA2 = 0.5
+
+
+@njit(cache=True, fastmath=False)
+def _qe_kernel(  # pragma: no cover - exercised via simulate_paths(backend="numba")
+    S, V, Z_v, Z_s, U, S0, v0, kappa, theta, xi, rho, r, q, dt,
+    gamma1, gamma2, psi_c, martingale,
+):
+    """Per-path Andersen QE loop. Mirrors the vectorized NumPy version exactly.
+
+    Numba JIT-compiles the scalar double loop (paths x steps); for many time
+    steps this beats the NumPy version, which pays Python-loop overhead once per
+    step. Writes spot and variance into the pre-allocated S, V arrays.
+    """
+    n_paths = Z_v.shape[0]
+    n_steps = Z_v.shape[1]
+    K0 = -rho * kappa * theta / xi * dt
+    K1 = gamma1 * dt * (kappa * rho / xi - 0.5) - rho / xi
+    K2 = gamma2 * dt * (kappa * rho / xi - 0.5) + rho / xi
+    K3 = gamma1 * dt * (1.0 - rho * rho)
+    K4 = gamma2 * dt * (1.0 - rho * rho)
+    A = K2 + 0.5 * K4
+    Bc = K1 + 0.5 * K3
+    exp_kdt = np.exp(-kappa * dt)
+    log_S0 = np.log(S0)
+
+    for pth in range(n_paths):
+        S[pth, 0] = S0
+        V[pth, 0] = v0
+        logS = log_S0
+        v = v0
+        for i in range(n_steps):
+            m = theta + (v - theta) * exp_kdt
+            s2 = (v * xi * xi * exp_kdt / kappa * (1.0 - exp_kdt)
+                  + theta * xi * xi / (2.0 * kappa) * (1.0 - exp_kdt) ** 2)
+            psi = s2 / max(m * m, 1e-16)
+            log_M = 0.0
+            ok = True
+            if psi <= psi_c:
+                inv = 1.0 / psi
+                b2 = 2.0 * inv - 1.0 + np.sqrt(2.0 * inv) * np.sqrt(2.0 * inv - 1.0)
+                a = m / (1.0 + b2)
+                v_next = a * (np.sqrt(b2) + Z_v[pth, i]) ** 2
+                d = 1.0 - 2.0 * A * a
+                if d > 1e-10:
+                    log_M = b2 * (A * a) / d - 0.5 * np.log(d)
+                else:
+                    ok = False
+            else:
+                p = (psi - 1.0) / (psi + 1.0)
+                beta = (1.0 - p) / max(m, 1e-16)
+                u = U[pth, i]
+                if u <= p:
+                    v_next = 0.0
+                else:
+                    v_next = np.log((1.0 - p) / max(1.0 - u, 1e-16)) / beta
+                d = beta - A
+                if d > 1e-10:
+                    M = p + (1.0 - p) * beta / d
+                    if M > 0.0:
+                        log_M = np.log(M)
+                    else:
+                        ok = False
+                else:
+                    ok = False
+            if martingale and ok:
+                K0_eff = -Bc * v - log_M
+            else:
+                K0_eff = K0
+            diff = K3 * v + K4 * v_next
+            logS = (logS + (r - q) * dt + K0_eff + K1 * v + K2 * v_next
+                    + np.sqrt(max(diff, 0.0)) * Z_s[pth, i])
+            v = v_next
+            S[pth, i + 1] = np.exp(logS)
+            V[pth, i + 1] = v_next
 
 
 @dataclass
@@ -73,11 +162,18 @@ class HestonQESimulator:
         seed: int | None = None,
         antithetic: bool = True,
         martingale_correction: bool = True,
+        backend: str = "numpy",
     ) -> tuple[np.ndarray, np.ndarray]:
         """Simulate full spot + variance paths under the QE scheme.
 
         Parameters
         ----------
+        backend : "numpy" (default) or "numba". Both consume the same
+            pre-generated random draws and so produce identical paths to
+            floating-point precision; "numba" JIT-compiles the per-path scalar
+            loop and is faster when n_steps is large (it avoids the Python
+            per-step overhead of the vectorized NumPy version). Requires numba;
+            falls back to NumPy with a note if it is not installed.
         martingale_correction : if True (default), use Andersen's (2008, sec.
             3.5) martingale-corrected log-spot drift. Instead of the constant
             K0 = -rho*kappa*theta/xi*dt, K0 becomes path-dependent,
@@ -119,6 +215,20 @@ class HestonQESimulator:
         V = np.empty((n_paths, n_steps + 1))
         S[:, 0] = S0
         V[:, 0] = v0
+
+        # --- Numba backend: JIT the per-path loop, same draws => same result. ---
+        if backend == "numba":
+            if not _HAS_NUMBA:  # pragma: no cover
+                import warnings
+                warnings.warn("numba not installed; falling back to numpy backend.",
+                              stacklevel=2)
+            else:
+                _qe_kernel(S, V, Z_v, Z_s, U, float(S0), float(v0),
+                           kappa, theta, xi, rho, self.r, self.q, dt,
+                           _GAMMA1, _GAMMA2, _PSI_C, bool(martingale_correction))
+                return S, V
+        elif backend != "numpy":
+            raise ValueError(f"backend must be 'numpy' or 'numba', got {backend!r}")
 
         # Cache the constants used by the log-spot update (Andersen eq. 33).
         K0 = -rho * kappa * theta / xi * dt

@@ -17,7 +17,11 @@ from volengine.calibration.objective import (
     build_iv_quotes,
     iv_rmse_objective,
 )
-from volengine.calibration.rbergomi_calibrator import RBergomiCalibrationResult, calibrate_rbergomi
+from volengine.calibration.rbergomi_calibrator import (
+    RBergomiCalibrationResult,
+    calibrate_rbergomi,
+    calibrate_rbergomi_fixed_xi0,
+)
 
 __all__ = [
     "IVQuote",
@@ -27,5 +31,6 @@ __all__ = [
     "calibrate_heston",
     "HestonCalibrationResult",
     "calibrate_rbergomi",
+    "calibrate_rbergomi_fixed_xi0",
     "RBergomiCalibrationResult",
 ]

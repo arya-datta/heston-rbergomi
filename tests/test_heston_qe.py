@@ -8,12 +8,34 @@ import numpy as np
 import pytest
 
 from volengine.models.heston import HestonQESimulator, heston_vanilla_price
+from volengine.models.heston.qe_simulation import _HAS_NUMBA
 
 
 def test_qe_variance_strictly_nonnegative(heston_params_typical, market):
     sim = HestonQESimulator(params=heston_params_typical, r=market["r"], q=market["q"])
     _, V = sim.simulate_paths(market["S0"], T=0.5, n_paths=2000, n_steps=50, seed=0)
     assert np.all(V >= 0.0)
+
+
+@pytest.mark.skipif(not _HAS_NUMBA, reason="numba not installed")
+def test_qe_numba_backend_matches_numpy(heston_params_typical, market):
+    """The JIT kernel and the NumPy loop share random draws, so they must agree
+    to floating-point precision — on both the martingale-corrected and plain
+    schemes."""
+    sim = HestonQESimulator(params=heston_params_typical, r=market["r"], q=market["q"])
+    for mc in (True, False):
+        S_np, V_np = sim.simulate_paths(market["S0"], T=0.5, n_paths=3000, n_steps=60,
+                                        seed=7, martingale_correction=mc, backend="numpy")
+        S_nb, V_nb = sim.simulate_paths(market["S0"], T=0.5, n_paths=3000, n_steps=60,
+                                        seed=7, martingale_correction=mc, backend="numba")
+        assert np.allclose(S_np, S_nb, rtol=1e-8, atol=1e-8)
+        assert np.allclose(V_np, V_nb, rtol=1e-8, atol=1e-8)
+
+
+def test_qe_backend_rejects_unknown(heston_params_typical, market):
+    sim = HestonQESimulator(params=heston_params_typical, r=market["r"], q=market["q"])
+    with pytest.raises(ValueError, match="backend"):
+        sim.simulate_paths(market["S0"], T=0.5, n_paths=100, n_steps=10, backend="cuda")
 
 
 @pytest.mark.slow

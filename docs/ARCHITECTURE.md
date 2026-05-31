@@ -173,4 +173,6 @@ A single trading day inside the backtest moves through every layer:
 | Replace bumped Greeks with AAD | new module under `models/heston/` and `models/rbergomi/` |
 | Add SSVI parameterization | new module under `surfaces/`, mirror `svi.py` interface |
 | Add a third model (Bates, Heston-Hull-White) | new sub-package `models/<name>/` |
-| Replace the flat xi0 with a curve | extend `RBergomiParameters.xi0` typing (it already accepts a callable) |
+| Use a real rate/dividend term structure | pass a `volengine.market.ZeroCurve` (instead of a float) for `r`/`q` to the calibrators |
+| Use a market forward-variance curve for rBergomi | `ForwardVarianceCurve.from_atm_term_structure(...)` + `calibrate_rbergomi_fixed_xi0(...)` |
+| Speed up Heston Monte Carlo | `HestonQESimulator.simulate_paths(..., backend="numba")` — ~3x, identical results |

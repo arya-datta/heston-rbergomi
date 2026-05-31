@@ -17,6 +17,7 @@ import numpy as np
 from scipy.optimize import differential_evolution, minimize
 
 from volengine.calibration.objective import FAILED_QUOTE_PENALTY, IVQuote
+from volengine.market.curves import Curve, as_curve
 from volengine.models.heston.carr_madan import heston_vanilla_price
 from volengine.models.heston.parameters import HESTON_BOUNDS, HestonParameters
 from volengine.surfaces.implied_vol import implied_vol
@@ -44,11 +45,16 @@ _CALIB_FFT_KWARGS = {"N": 4096, "eta": 0.25}
 def _model_ivs(
     params: HestonParameters,
     S0: float,
-    r: float,
-    q: float,
+    r_curve: Curve,
+    q_curve: Curve,
     quotes: list[IVQuote],
 ) -> np.ndarray:
-    """Vectorized model IVs for a list of quotes, grouped by maturity for FFT speed."""
+    """Vectorized model IVs for a list of quotes, grouped by maturity for FFT speed.
+
+    Each maturity uses its own zero rates `r(T)`, `q(T)` from the supplied
+    curves, so a term-structured rate/dividend environment is priced correctly
+    rather than with a single flat rate.
+    """
     out = np.empty(len(quotes))
     out[:] = np.nan
     # Group indices by maturity so each maturity only invokes one FFT.
@@ -56,23 +62,24 @@ def _model_ivs(
     for i, qte in enumerate(quotes):
         by_T.setdefault(qte.T, []).append(i)
     for T, idxs in by_T.items():
+        r_T, q_T = r_curve.zero_rate(T), q_curve.zero_rate(T)
         Ks = np.array([quotes[i].K for i in idxs])
         try:
-            prices = heston_vanilla_price(Ks, T, S0, r, q, params, flag="call",
+            prices = heston_vanilla_price(Ks, T, S0, r_T, q_T, params, flag="call",
                                           **_CALIB_FFT_KWARGS)
         except (FloatingPointError, ValueError):
             continue
         prices = np.atleast_1d(prices)
         for j, i in enumerate(idxs):
-            out[i] = implied_vol(float(prices[j]), S0, Ks[j], T, r, q, "call")
+            out[i] = implied_vol(float(prices[j]), S0, Ks[j], T, r_T, q_T, "call")
     return out
 
 
 def _objective_factory(
     quotes: list[IVQuote],
     S0: float,
-    r: float,
-    q: float,
+    r_curve: Curve,
+    q_curve: Curve,
 ):
     """Closure that maps a 5-vector (kappa, theta, xi, rho, v0) -> weighted RMSE."""
     weights = np.array([qt.weight for qt in quotes])
@@ -80,7 +87,7 @@ def _objective_factory(
 
     def f(x: np.ndarray) -> float:
         params = HestonParameters(*x)
-        iv_model = _model_ivs(params, S0, r, q, quotes)
+        iv_model = _model_ivs(params, S0, r_curve, q_curve, quotes)
         bad = ~np.isfinite(iv_model)
         # Penalty for failed pricings pushes DE away from bad regions.
         err = np.where(bad, FAILED_QUOTE_PENALTY, iv_model - iv_mkt)
@@ -92,8 +99,8 @@ def _objective_factory(
 def calibrate_heston(
     quotes: list[IVQuote],
     S0: float,
-    r: float,
-    q: float,
+    r: float | Curve,
+    q: float | Curve,
     initial: HestonParameters | None = None,
     de_maxiter: int = 80,
     de_popsize: int = 20,
@@ -105,7 +112,10 @@ def calibrate_heston(
     Parameters
     ----------
     quotes : list of (K, T, iv_mkt, weight) tuples.
-    S0, r, q : spot and rates.
+    S0 : spot.
+    r, q : risk-free rate and dividend yield. Either a float (flat) or a
+        `volengine.market.Curve` for true term structure — each maturity is
+        then priced and inverted with its own zero rate.
     initial : optional warm start (typical: previous day's params).
     de_maxiter, de_popsize : differential evolution settings.
     seed : reproducibility for the global stage.
@@ -120,7 +130,8 @@ def calibrate_heston(
     if not quotes:
         raise ValueError("No quotes supplied to calibration.")
 
-    obj = _objective_factory(quotes, S0, r, q)
+    r_curve, q_curve = as_curve(r), as_curve(q)
+    obj = _objective_factory(quotes, S0, r_curve, q_curve)
     bounds = [HESTON_BOUNDS[k] for k in ("kappa", "theta", "xi", "rho", "v0")]
 
     # Global stage.
