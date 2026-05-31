@@ -117,7 +117,7 @@ def fit_svi_slice(
     iv: np.ndarray,
     T: float,
     weights: np.ndarray | None = None,
-    butterfly_penalty: float = 1e3,
+    butterfly_penalty: float = 1.0,
     initial: SVIParameters | None = None,
 ) -> SVIParameters:
     """Calibrate a raw-SVI slice to observed implied vols.
@@ -128,7 +128,7 @@ def fit_svi_slice(
     iv: observed implied volatilities at those strikes.
     T : maturity in years.
     weights : optional per-point weights (default = uniform).
-    butterfly_penalty : weight on integrated negative-g penalty.
+    butterfly_penalty : weight on the no-arbitrage soft penalty.
     initial : optional warm-start parameters.
 
     Returns
@@ -137,9 +137,24 @@ def fit_svi_slice(
 
     Notes
     -----
-    The objective is weighted MSE on total variance w = iv^2 * T plus a soft
-    penalty on butterfly violations. We use L-BFGS-B with box constraints; if
-    no warm start is supplied, a moment-based heuristic is used.
+    The objective is weighted MSE in **implied-vol space** plus a soft
+    butterfly-arbitrage penalty. Two deliberate choices make this robust at
+    short maturities (where the naive version collapses to a flat, zero-skew
+    fit):
+
+    1. Fitting `sigma_model - sigma_target` (each O(0.2)) rather than total
+       variance `w = sigma^2 T` (which is ~0.002 at one month) keeps the fit
+       error on a maturity-independent scale, so it isn't swamped by the
+       penalty.
+    2. Penalizing `g(k) * w(k)` rather than `g(k)` removes the `1/w` blow-up in
+       the no-arb function: at short T, `1/w ~ 500`, so any skew produces a huge
+       spurious `g`, and a fixed penalty would force `b -> 0`. Scaling by `w`
+       makes the penalty maturity-consistent. The penalty is evaluated only on
+       a grid spanning the observed strikes (plus a small margin) — penalizing
+       far-extrapolated regions over-constrains the wings.
+
+    Uses L-BFGS-B with box constraints; a moment-based heuristic warm start is
+    used when none is supplied.
     """
     k = np.asarray(k, dtype=float)
     iv = np.asarray(iv, dtype=float)
@@ -161,23 +176,30 @@ def fit_svi_slice(
             sigma=0.1,
         )
 
-    # Dense grid for the butterfly penalty so the optimizer can't squeeze
-    # negative g between two market strikes.
-    k_dense = np.linspace(min(k.min(), -0.5) - 0.1, max(k.max(), 0.5) + 0.1, 200)
+    # Butterfly-penalty grid: span the observed strikes plus a small margin.
+    # Penalizing far-extrapolated k over-constrains the wings and (at short T)
+    # forces the skew to zero.
+    k_lo, k_hi = k.min() - 0.05, k.max() + 0.05
+    k_dense = np.linspace(k_lo, k_hi, 200)
 
     def objective(x: np.ndarray) -> float:
         p = SVIParameters.from_array(x)
         w_model = svi_total_variance(k, p)
-        fit_err = np.sum(weights * (w_model - target_w) ** 2)
+        iv_model = np.sqrt(np.maximum(w_model, 1e-12) / T)
+        fit_err = np.sum(weights * (iv_model - iv) ** 2)
+        # Penalize g * w (scale-stable) instead of g (which blows up as 1/w).
+        w_dense = np.maximum(svi_total_variance(k_dense, p), 1e-12)
         g = svi_butterfly_function(k_dense, p)
-        butterfly = np.sum(np.minimum(g, 0.0) ** 2)
+        butterfly = np.sum(np.minimum(g * w_dense, 0.0) ** 2)
         return float(fit_err + butterfly_penalty * butterfly)
 
     bounds = [
         (1e-6, 1.0),       # a >= 0 (total variance is non-negative)
         (1e-6, 5.0),       # b >= 0
         (-0.999, 0.999),   # |rho| < 1
-        (-2.0, 2.0),       # m within plausible log-moneyness range
+        (-1.0, 1.0),       # m: smile vertex stays near the data range, not run
+                           #    to a far bound (which collapses the fit when the
+                           #    strike coverage is narrow / asymmetric)
         (1e-4, 5.0),       # sigma > 0
     ]
     result = minimize(

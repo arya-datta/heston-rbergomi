@@ -62,21 +62,36 @@ def try_load(symbols: list[str], provider: str, date: dt.date,
     raise RuntimeError(f"All symbols failed. Last error: {last_err}")
 
 
+def _subsample(n: int, k: int) -> np.ndarray:
+    """Return up to k evenly-spaced indices into range(n)."""
+    if n <= k:
+        return np.arange(n)
+    return np.unique(np.linspace(0, n - 1, k).round().astype(int))
+
+
 def build_quotes_and_surface(
     snap: OptionChainSnapshot,
+    max_maturities: int = 8,
+    max_strikes_per_maturity: int = 9,
 ) -> tuple[list[IVQuote], SVISurface, dict[float, float]]:
     """Filter the chain, invert IVs, fit SVI per maturity.
 
-    Returns (IVQuote list, SVI surface, dict of maturity-> ATM iv) so downstream
-    code can plot whatever it needs without re-deriving these.
+    SVI slices are fit on ALL liquid strikes (cheap, accurate surface). The
+    quote set fed to the *stochastic-vol calibrators* is then subsampled to
+    `max_maturities` x `max_strikes_per_maturity` — a liquid SPY chain has
+    1000+ quotes across ~18 maturities, which would make Heston/rBergomi
+    calibration (Brent inversion + MC per objective eval) take many minutes
+    for no benefit to a term-structure plot.
+
+    Returns (IVQuote list, SVI surface, dict of maturity -> ATM iv).
     """
     df = filter_for_calibration(
         snap, min_dte_days=14, max_dte_days=365, min_oi=10,
         max_spread_frac=0.50, moneyness_band=(0.85, 1.15), flag="call",
     )
-    quotes: list[IVQuote] = []
     slices: dict[float, object] = {}
     atm_iv: dict[float, float] = {}
+    per_T: dict[float, tuple[np.ndarray, np.ndarray]] = {}  # T -> (K, ivs)
     for T, group in df.groupby("dte_years"):
         if T < 14 / 365.25:                  # skip ultra-short which is noisy
             continue
@@ -96,16 +111,44 @@ def build_quotes_and_surface(
             p = fit_svi_slice(k_log, ivs, T)
         except Exception:
             continue
+        # Skip degenerate fits (b collapsed to ~0 => flat, zero-skew slice, or
+        # the vertex ran to a bound). These pollute the market skew curve.
+        if p.b < 1e-3 or abs(p.m) > 0.95:
+            continue
         slices[float(T)] = p
-        # ATM iv via SVI at k = 0
-        atm_iv[float(T)] = float(np.sqrt(max(
-            np.interp(0.0, k_log, ivs ** 2), 1e-12)))
-        for kk, iv in zip(K, ivs, strict=True):
-            # Weight inversely with distance from ATM — liquid quotes dominate.
+        atm_iv[float(T)] = float(np.sqrt(max(np.interp(0.0, k_log, ivs ** 2), 1e-12)))
+        per_T[float(T)] = (K, ivs)
+
+    # Subsample maturities and strikes for the calibration quote set.
+    fitted_Ts = sorted(per_T.keys())
+    keep_Ts = [fitted_Ts[i] for i in _subsample(len(fitted_Ts), max_maturities)]
+    quotes: list[IVQuote] = []
+    for T in keep_Ts:
+        K, ivs = per_T[T]
+        idx = _subsample(len(K), max_strikes_per_maturity)
+        for kk, iv in zip(K[idx], ivs[idx], strict=True):
             w = 1.0 / max(abs(np.log(kk / snap.spot)) + 0.05, 0.05)
             quotes.append(IVQuote(K=float(kk), T=T, iv_mkt=float(iv), weight=w))
+
     surface = SVISurface(maturities=np.array(sorted(slices.keys())), slices=slices)
     return quotes, surface, atm_iv
+
+
+def _market_skew_at(surface: SVISurface, T: float, dk: float = 1e-3) -> float:
+    """Market ATM skew |d sigma_imp / dk|_{k=0} at maturity T.
+
+    Uses an exact fitted slice when T is a slice maturity (which it always is
+    when `compute_skew_curves` is driven by the fitted maturities), and falls
+    back to the surface's total-variance interpolation otherwise. Either way
+    the skew is evaluated at the SAME T it is plotted at — the previous code
+    computed the market skew at the nearest fitted slice but plotted it at a
+    different grid maturity, horizontally distorting the headline curve.
+    """
+    if T in surface.slices:
+        return atm_skew_from_surface(surface.slices[T], T)
+    iv_p = float(surface.implied_vol(dk, T))
+    iv_m = float(surface.implied_vol(-dk, T))
+    return abs((iv_p - iv_m) / (2.0 * dk))
 
 
 def compute_skew_curves(
@@ -118,15 +161,14 @@ def compute_skew_curves(
     rb_n_steps_per_year: int = 100,
     seed: int = 7,
 ) -> pd.DataFrame:
-    """Compute ATM skew under each model across `maturities`."""
+    """Compute ATM skew under each model at each maturity in `maturities`.
+
+    All three curves (market, Heston, rBergomi) are evaluated at the exact
+    same T, so the headline plot has no horizontal misalignment.
+    """
     rows = []
     for T in maturities:
-        # Market skew from the (possibly interpolated) SVI surface.
-        # Find the closest fitted slice — atm_skew_from_surface needs a slice, not surface.
-        Ts = sorted(surface.slices.keys())
-        T_near = Ts[int(np.argmin(np.abs(np.array(Ts) - T)))]
-        mkt = atm_skew_from_surface(surface.slices[T_near], T_near)
-
+        mkt = _market_skew_at(surface, float(T))
         h = heston_atm_skew(heston_params, T=T, S0=S0, r=r, q=q, dk=5e-3)
         rb = rbergomi_atm_skew(
             rbergomi_params, T=T, S0=S0, r=r, q=q, dk=1.5e-2,
@@ -134,7 +176,7 @@ def compute_skew_curves(
             n_steps=max(20, int(rb_n_steps_per_year * T)),
             seed=seed,
         )
-        rows.append(dict(T=T, market=mkt, heston=h, rbergomi=rb))
+        rows.append(dict(T=float(T), market=mkt, heston=h, rbergomi=rb))
     return pd.DataFrame(rows)
 
 
@@ -237,12 +279,18 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"rBergomi calibrated: RMSE = {rb_res.rmse_vol_points*100:.2f} vol pts, "
              f"params = {rb_params}", t0)
 
-    # Skew grid: log-spaced from shortest fitted slice to longest, capped at 1y
+    # Skew grid: use the actual fitted slice maturities (within [14d, 1y]) so
+    # the market skew is read off an exact SVI slice at each plotted point —
+    # no nearest-neighbour x-misalignment. Subsample if there are many.
     Ts_fit = np.array(sorted(surface.slices.keys()))
-    T_min = max(Ts_fit.min(), 14 / 365.25)
-    T_max = min(Ts_fit.max(), 1.0)
-    skew_Ts = np.geomspace(T_min, T_max, 7)
-    _log(f"computing skew at {len(skew_Ts)} maturities: "
+    in_band = Ts_fit[(Ts_fit >= 14 / 365.25) & (Ts_fit <= 1.0)]
+    if len(in_band) < 4:
+        in_band = Ts_fit  # fall back to all fitted maturities
+    if len(in_band) > 8:
+        idx = np.linspace(0, len(in_band) - 1, 8).round().astype(int)
+        in_band = in_band[np.unique(idx)]
+    skew_Ts = in_band
+    _log(f"computing skew at {len(skew_Ts)} fitted maturities: "
          f"{[f'{T:.2f}y' for T in skew_Ts]}", t0)
 
     skew_df = compute_skew_curves(

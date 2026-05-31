@@ -29,11 +29,37 @@ def test_qe_vanilla_price_matches_fft(heston_params_typical, market):
 
 
 @pytest.mark.slow
-def test_qe_terminal_mean_unbiased_under_zero_drift(market):
-    """Under r = q = 0, E[S_T] = S_0 exactly (martingale property)."""
+def test_qe_terminal_mean_is_martingale(market):
+    """With the martingale correction, E[S_T] = S0 e^{(r-q)T} within MC error.
+
+    Asserts the mean lands within 3.5 sample standard errors of the exact
+    forward — a real test of unbiasedness, not the old loose 0.5 window. Uses a
+    deliberately sub-Feller, high-vol-of-vol setting where the *uncorrected*
+    scheme's drift bias is largest.
+    """
     from volengine.models.heston import HestonParameters
-    p = HestonParameters(kappa=2.0, theta=0.04, xi=0.4, rho=-0.5, v0=0.04)
-    sim = HestonQESimulator(params=p, r=0.0, q=0.0)
-    ST = sim.terminal_spots(market["S0"], T=0.5, n_paths=50_000, n_steps=80, seed=7)
-    # MC standard error scales like S0 * sigma * sqrt(T) / sqrt(N) ~= 0.6 -> 3 sigma ~ 1.8.
-    assert abs(ST.mean() - market["S0"]) < 0.5
+    p = HestonParameters(kappa=1.0, theta=0.06, xi=0.9, rho=-0.7, v0=0.06)  # 2kt=0.12 < xi^2=0.81
+    r, q, T, N = 0.03, 0.01, 1.0, 100_000
+    sim = HestonQESimulator(params=p, r=r, q=q)
+    ST = sim.terminal_spots(market["S0"], T, n_paths=N, n_steps=100, seed=7)
+    fwd = market["S0"] * np.exp((r - q) * T)
+    stderr = ST.std(ddof=1) / np.sqrt(N)
+    assert abs(ST.mean() - fwd) < 3.5 * stderr
+
+
+@pytest.mark.slow
+def test_qe_martingale_correction_reduces_bias(market):
+    """The correction must bring E[S_T] closer to the exact forward than the
+    uncorrected scheme, on shared random numbers (so the comparison is clean)."""
+    from volengine.models.heston import HestonParameters
+    p = HestonParameters(kappa=1.0, theta=0.06, xi=0.9, rho=-0.7, v0=0.06)
+    r, q, T, N = 0.03, 0.01, 1.0, 100_000
+    sim = HestonQESimulator(params=p, r=r, q=q)
+    fwd = market["S0"] * np.exp((r - q) * T)
+    st_corr, _ = sim.simulate_paths(market["S0"], T, N, 100, seed=7,
+                                    martingale_correction=True)
+    st_plain, _ = sim.simulate_paths(market["S0"], T, N, 100, seed=7,
+                                     martingale_correction=False)
+    bias_corr = abs(st_corr[:, -1].mean() - fwd)
+    bias_plain = abs(st_plain[:, -1].mean() - fwd)
+    assert bias_corr < bias_plain

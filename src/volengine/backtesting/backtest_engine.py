@@ -179,7 +179,12 @@ def _model_risk_spread(
                 n_paths=rbergomi_n_paths, n_steps=n_steps, seed=12345,
             )
             rb_prices = np.atleast_1d(rb_prices)
-        except Exception:  # pragma: no cover
+        except (ValueError, FloatingPointError, np.linalg.LinAlgError) as e:
+            # Numerical pricing failure for this maturity (e.g. degenerate
+            # params, Cholesky failure in the hybrid scheme). Skip the maturity
+            # but let unexpected errors (bugs, MemoryError, KeyboardInterrupt)
+            # propagate rather than silently swallowing them.
+            logger.warning("model-risk pricing failed at T=%.3f: %s", T, e)
             continue
         diffs.extend(np.abs(h_prices - rb_prices).tolist())
     if not diffs:

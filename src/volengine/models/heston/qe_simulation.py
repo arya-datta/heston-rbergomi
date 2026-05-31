@@ -72,8 +72,24 @@ class HestonQESimulator:
         n_steps: int,
         seed: int | None = None,
         antithetic: bool = True,
+        martingale_correction: bool = True,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Simulate full spot + variance paths under the QE scheme.
+
+        Parameters
+        ----------
+        martingale_correction : if True (default), use Andersen's (2008, sec.
+            3.5) martingale-corrected log-spot drift. Instead of the constant
+            K0 = -rho*kappa*theta/xi*dt, K0 becomes path-dependent,
+                K0*(V_t) = -(K1 + K3/2) V_t - log M(K2 + K4/2),
+            where M is the conditional moment generating function of V_{t+dt}
+            given V_t under the QE distribution (squared-Gaussian on the low-psi
+            branch, exponential-with-mass on the high-psi branch). This makes
+            E[S_{t+dt} | F_t] = S_t e^{(r-q)dt} hold *exactly*, so the simulated
+            discounted spot is a true martingale — removing the O(dt) drift bias
+            of the plain scheme. Falls back to the constant K0 on any path where
+            the MGF moment condition (1 - 2 A a > 0, or beta - A > 0) is
+            violated (rare for SPX-scale parameters).
 
         Returns
         -------
@@ -111,6 +127,11 @@ class HestonQESimulator:
         K3 = _GAMMA1 * dt * (1.0 - rho**2)
         K4 = _GAMMA2 * dt * (1.0 - rho**2)
         exp_kdt = np.exp(-kappa * dt)
+        # MGF argument for the martingale correction: the V_{t+dt} coefficient
+        # after integrating out the spot Brownian increment Z (which contributes
+        # +0.5*(K3 V_t + K4 V_{t+dt})).
+        A_mgf = K2 + 0.5 * K4
+        B_mgf = K1 + 0.5 * K3   # coefficient on V_t
 
         logS = np.log(S[:, 0])
         for i in range(n_steps):
@@ -124,6 +145,9 @@ class HestonQESimulator:
             psi = s2 / np.maximum(m**2, 1e-16)
 
             v_next = np.empty_like(v_curr)
+            # log M(A_mgf) for the martingale correction, per path.
+            log_M = np.zeros_like(v_curr)
+            mgf_ok = np.ones_like(v_curr, dtype=bool)
 
             # --- Low-psi branch: squared-Gaussian approximation. ---
             low = psi <= _PSI_C
@@ -134,6 +158,16 @@ class HestonQESimulator:
                 b2 = 2.0 * inv_psi - 1.0 + np.sqrt(2.0 * inv_psi) * np.sqrt(2.0 * inv_psi - 1.0)
                 a = m[low] / (1.0 + b2)
                 v_next[low] = a * (np.sqrt(b2) + Z_v[low, i]) ** 2
+                # Noncentral chi-square (1 dof, noncentrality b2) MGF of a*X at A:
+                #   M(A) = (1 - 2 A a)^{-1/2} exp(b2 * A a / (1 - 2 A a))
+                #   log M = -0.5 log(1 - 2 A a) + b2 * A a / (1 - 2 A a)
+                d_low = 1.0 - 2.0 * A_mgf * a
+                good_low = d_low > 1e-10
+                d_safe = np.where(good_low, d_low, 1.0)
+                log_M_low = b2 * (A_mgf * a) / d_safe - 0.5 * np.log(d_safe)
+                idx_low = np.nonzero(low)[0]
+                log_M[idx_low] = np.where(good_low, log_M_low, 0.0)
+                mgf_ok[idx_low] = good_low
 
             # --- High-psi branch: exponential with point mass at 0. ---
             high = ~low
@@ -144,12 +178,27 @@ class HestonQESimulator:
                 u_hi = U[high, i]
                 v_next_hi = np.where(u_hi <= p, 0.0, np.log((1.0 - p) / np.maximum(1.0 - u_hi, 1e-16)) / beta)
                 v_next[high] = v_next_hi
+                # Exponential-with-mass MGF at A:  M(A) = p + (1-p) beta / (beta - A)
+                d_high = beta - A_mgf
+                good_high = d_high > 1e-10
+                d_safe = np.where(good_high, d_high, 1.0)
+                M_high = p + (1.0 - p) * beta / d_safe
+                good_high = good_high & (M_high > 0.0)
+                idx_high = np.nonzero(high)[0]
+                log_M[idx_high] = np.where(good_high, np.log(np.where(M_high > 0.0, M_high, 1.0)), 0.0)
+                mgf_ok[idx_high] = good_high
+
+            # Drift constant: martingale-corrected (path-dependent) or plain.
+            if martingale_correction:
+                K0_eff = np.where(mgf_ok, -B_mgf * v_curr - log_M, K0)
+            else:
+                K0_eff = K0
 
             # Log-spot update (Andersen eq. 33), conditional on (v_curr, v_next).
             logS = (
                 logS
                 + (self.r - self.q) * dt
-                + K0
+                + K0_eff
                 + K1 * v_curr
                 + K2 * v_next
                 + np.sqrt(K3 * v_curr + K4 * v_next) * Z_s[:, i]

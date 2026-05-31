@@ -10,10 +10,15 @@ portfolio across many trading days.
 
 ## Headline result
 
+![ATM-skew term structure](results/figures/atm_skew_term_structure.png)
+
 The killer plot is `results/figures/atm_skew_term_structure.png` — log-log plot
-of ATM skew vs. maturity, with Heston (slope → −1 as τ → 0, much too steep
-short-dated and too flat long-dated) and rBergomi (slope ≈ H − 1/2 ≈ −0.4,
-matching market) overlaid on real SPX market data.
+of ATM skew vs. maturity, with Heston (too flat at long maturities, too steep
+at short) and rBergomi (slope ≈ H − 1/2, matching the market decay) overlaid on
+real listed-option market data. Regenerate it with `volengine-generate-headline`.
+The shipped figure uses SPY (the free-tier yfinance provider has no SPX index
+chain); pass `--symbol SPX --provider intrinio` with a paid provider for the
+index itself.
 
 ## Repo map
 
